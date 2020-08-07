@@ -15,7 +15,7 @@
 # FindIdaSdk
 # ----------
 #
-# Locates and configures the IDA Pro SDK. Only support version 7.0 or hight.
+# Locates and configures the IDA Pro SDK. Supports version 7.0 or higher.
 #
 # Use this module by invoking find_package with the form:
 #
@@ -36,7 +36,6 @@
 # Example (this assumes Windows):
 #
 #   find_package(IdaSdk REQUIRED)
-#   include_directories(${IdaSdk_INCLUDE_DIRS})
 #
 #   # Builds targets plugin.dll and plugin64.dll
 #   add_ida_plugin(plugin myplugin.cc)
@@ -142,7 +141,10 @@ function(_ida_plugin name ea64 link_script)  # ARGN contains sources
 
     # For qrefcnt_obj_t in ida.hpp
     # TODO(cblichmann): This belongs in an interface library instead.
-    target_compile_options(${t} PUBLIC -Wno-non-virtual-dtor)
+    target_compile_options(${t} PUBLIC
+      -Wno-non-virtual-dtor
+      -Wno-varargs
+    )
   elseif(WIN32)
     if(ea64)
       target_link_libraries(${t} ${IdaSdk_DIR}/lib/x64_win_vc_64/ida.lib)

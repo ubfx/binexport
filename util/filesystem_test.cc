@@ -19,13 +19,13 @@
 #include "third_party/absl/strings/str_cat.h"
 #include "third_party/zynamics/binexport/util/status_matchers.h"
 
+namespace security::binexport {
+namespace {
+
 using ::testing::IsEmpty;
 using ::testing::IsFalse;
 using ::testing::IsTrue;
 using ::testing::StrEq;
-
-namespace security::binexport {
-namespace {
 
 TEST(FileSystemTest, Filenames) {
   EXPECT_THAT(Basename(absl::StrCat(kPathSeparator, "subdir", kPathSeparator,
@@ -49,6 +49,10 @@ TEST(FileSystemTest, Filenames) {
       ReplaceFileExtension(
           absl::StrCat("subdir", kPathSeparator, "filename_noext"), ".new"),
       StrEq(absl::StrCat("subdir", kPathSeparator, "filename_noext.new")));
+  // Remove file extension
+  EXPECT_THAT(ReplaceFileExtension(
+                  absl::StrCat("subdir", kPathSeparator, "filename.ext"), ""),
+              StrEq(absl::StrCat("subdir", kPathSeparator, "filename")));
   // Test that directories with a "." in them don't throw of extension
   // replacement.
   EXPECT_THAT(
@@ -65,11 +69,17 @@ TEST(FileSystemTest, JoinPaths) {
 #endif
 }
 
+TEST(FileSystemTest, FullPaths) {
+  const std::string current = GetCurrentDirectory();
+  EXPECT_THAT(GetFullPathName("filename"),
+              StrEq(absl::StrCat(current, kPathSeparator, "filename")));
+}
+
 TEST(FileSystemTest, CreateAndRemoveDirectories) {
   NA_ASSERT_OK_AND_ASSIGN(std::string temp_dir,
                           GetOrCreateTempDirectory("test"));
 
-  const auto test_path = JoinPath(temp_dir, "sub", "dir", "s2");
+  const std::string test_path = JoinPath(temp_dir, "sub", "dir", "s2");
   EXPECT_THAT(CreateDirectories(test_path).ok(), IsTrue());
 
   EXPECT_THAT(RemoveAll(test_path).ok(), IsTrue());

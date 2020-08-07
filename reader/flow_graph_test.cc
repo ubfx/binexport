@@ -21,7 +21,7 @@
 #include "third_party/zynamics/binexport/binexport.h"
 #include "third_party/zynamics/binexport/reader/graph_utility.h"
 #include "third_party/zynamics/binexport/reader/instruction.h"
-#include "third_party/zynamics/binexport/reader/reader_test_util.h"
+#include "third_party/zynamics/binexport/testing.h"
 
 namespace security::binexport {
 namespace {
@@ -29,16 +29,17 @@ namespace {
 using ::testing::Eq;
 
 static constexpr char kBinExport2Item[] =
+    "binexport/reader/testdata/"
     "0000500ed9f688a309ee2176462eb978efa9a2fb80fcceb5d8fd08168ea50dfd."
     "BinExport";
 
 class FlowGraphTest : public testing::Test {
  protected:
   void SetUp() override {
-    QCHECK_OK(GetBinExportProtoForTesting(kBinExport2Item, &proto_));
+    proto_ = GetBinExportForTesting(kBinExport2Item);
     flow_graph_ = FlowGraph::FromBinExport2Proto(
         proto_, proto_.flow_graph(0),
-        binexport::GetAllInstructionAddresses(proto_));
+        GetAllInstructionAddresses(proto_));
   }
 
   std::unique_ptr<FlowGraph> flow_graph_;
@@ -115,9 +116,8 @@ TEST_F(FlowGraphTest, GetInstructions) {
 TEST_F(FlowGraphTest, GetCallTargets) {
   const auto& flow_graph(FlowGraph::FromBinExport2Proto(
       proto_, proto_.flow_graph(1),
-      binexport::GetAllInstructionAddresses(proto_)));
+      GetAllInstructionAddresses(proto_)));
   const auto& vertex = flow_graph->GetVertex(0x003221BE);
-  LOG(INFO) << vertex;
   std::vector<Address> call_targets;
   flow_graph->GetCallTargets(vertex, std::back_inserter(call_targets));
   EXPECT_THAT(call_targets.size(), Eq(9));
@@ -130,7 +130,7 @@ TEST_F(FlowGraphTest, GetCallTargets) {
 TEST_F(FlowGraphTest, GetCallTargetsMultiple) {
   const auto& flow_graph(FlowGraph::FromBinExport2Proto(
       proto_, proto_.flow_graph(2),
-      binexport::GetAllInstructionAddresses(proto_)));
+      GetAllInstructionAddresses(proto_)));
   const auto& vertex = flow_graph->GetVertex(0x00322310);
   LOG(INFO) << vertex;
   std::vector<Address> call_targets;

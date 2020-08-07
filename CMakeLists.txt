@@ -16,10 +16,12 @@ cmake_minimum_required(VERSION 3.12)
 cmake_policy(VERSION 3.12)
 project(binexport VERSION 11)  # Only major version is used
 
+option(BINEXPORT_ENABLE_POSTGRESQL "Enable export to PostresSQL databases" OFF)
+
+include(GoogleTest) # Needs to come before changing module path
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR})
 include(copts.cmake)
 include(util.cmake)
-
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
 # Use a copy of a subset of Boost that we ship
@@ -32,15 +34,18 @@ set(Protobuf_USE_STATIC_LIBS TRUE)
 find_package(Boost 1.55 REQUIRED)
 find_package(Git)
 find_package(IdaSdk REQUIRED)
+find_package(BinaryNinjaApi)
 find_package(OpenSSL 1.0.2 REQUIRED)
-find_package(PostgreSQL 9.5 REQUIRED)
+if(BINEXPORT_ENABLE_POSTGRESQL)
+  find_package(PostgreSQL 9.5 REQUIRED)
+endif()
 find_package(Protobuf 3.0.0 REQUIRED)
 include(googletest.cmake)
 include(absl.cmake)
 
 enable_testing()
 
-if(WIN32)
+if(BINEXPORT_ENABLE_POSTGRESQL AND WIN32)
   list(GET PostgreSQL_LIBRARIES 0 postgresql_lib)
   get_filename_component(postgresql_root ${postgresql_lib} DIRECTORY)
   list(APPEND PostgreSQL_LIBRARIES ${postgresql_root}/libpgport.lib)
@@ -78,9 +83,16 @@ target_include_directories(binexport_base INTERFACE
   ${PROJECT_BINARY_DIR}/gen_include
   ${PROJECT_BINARY_DIR}/src_include
   ${Boost_INCLUDE_DIR}
-  ${PostgreSQL_INCLUDE_DIRS}
   ${Protobuf_INCLUDE_DIRS}
 )
+if(BINEXPORT_ENABLE_POSTGRESQL)
+  target_include_directories(binexport_base INTERFACE
+    ${PostgreSQL_INCLUDE_DIRS}
+  )
+  target_compile_definitions(binexport_base INTERFACE
+    ENABLE_POSTGRESQL
+  )
+endif()
 target_link_libraries(binexport_base INTERFACE
   ${Protobuf_LIBRARIES}  # Same as protobuf::libprotobuf
 )
@@ -103,21 +115,26 @@ add_library(binexport_shared STATIC
   binexport.h
   hash.cc
   hash.h
-  util/canonical_errors.cc
-  util/canonical_errors.h
   util/filesystem.cc
   util/filesystem.h
   util/format.cc
   util/format.h
-  util/status.cc
-  util/status.h
+  util/idb_export.cc
+  util/idb_export.h
+  util/logging.cc
+  util/logging.h
+  util/process.cc
+  util/process.h
   util/status_macros.h
   util/statusor.h
   util/timer.h
 )
 target_link_libraries(binexport_shared PUBLIC
   absl::bad_optional_access
+  absl::flat_hash_map
+  absl::flat_hash_set
   absl::optional
+  absl::status
   absl::str_format
   absl::strings
   absl::time
@@ -128,19 +145,13 @@ if(WIN32)
   target_link_libraries(binexport_shared PUBLIC
     shlwapi.lib
   )
-else()
-  if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
-    target_link_libraries(binexport_shared PUBLIC
-      stdc++fs
-    )
-  endif()
 endif()
 add_executable(binexport_shared_test
   util/filesystem_test.cc
   util/format_test.cc
+  util/process_test.cc
   util/status_macros_test.cc
   util/status_matchers.h
-  util/status_test.cc
   util/statusor_test.cc
   util/timer_test.cc
 )
@@ -148,16 +159,24 @@ target_link_libraries(binexport_shared_test PUBLIC
   binexport_test_base
   binexport_shared
 )
-add_test(BinExportSharedTests binexport_shared_test)
+gtest_discover_tests(binexport_shared_test)
 
-add_library(binexport_test_util
-  binexport_test_util.cc
-  binexport_test_util.h
+add_library(binexport_testing
+  testing.cc
+  testing.h
 )
-target_link_libraries(binexport_test_util PUBLIC
+target_link_libraries(binexport_testing PUBLIC
   binexport_test_base
   binexport_shared
-  absl::memory
+)
+
+add_executable(idb_export_test util/idb_export_test.cc)
+target_link_libraries(idb_export_test
+  binexport_test_base
+  binexport_shared
+)
+gtest_discover_tests(idb_export_test PROPERTIES
+  ENVIRONMENT "TEST_TMPDIR=${PROJECT_BINARY_DIR}/idb_export_test_tmp"
 )
 
 # General BinExport tests
@@ -169,31 +188,13 @@ target_link_libraries(binexport_test PUBLIC
   binexport_shared
   absl::memory
 )
-add_test(BinExportTests binexport_test)
+gtest_discover_tests(binexport_test)
 
 # binexport2dump tool
 add_subdirectory(tools)
 
-# Code shared with the BinDiff plugin
-add_ida_library(binexport_plugin_shared STATIC
-  hash.cc
-  hash.h
-  ida/digest.cc
-  ida/digest.h
-  ida/log.cc
-  ida/log.h
-  ida/ui.cc
-  ida/ui.h
-  ida/util.cc
-  ida/util.h
-)
-ida_target_link_libraries(binexport_plugin_shared PUBLIC
-  absl::time
-  binexport_base
-)
-
-set(binexport_plugin_name binexport${binexport_VERSION_MAJOR})
-add_ida_plugin(${binexport_plugin_name}
+# Non-plugin code shared with BinDiff/the Binary Ninja plugin
+add_library(binexport_core
   address_references.cc
   address_references.h
   base_types.cc
@@ -206,16 +207,6 @@ add_ida_plugin(${binexport_plugin_name}
   call_graph.h
   comment.cc
   comment.h
-  database/initialize_constraints_postgresql_sql.h
-  database/initialize_indices_postgresql_sql.h
-  database/initialize_tables_postgresql_sql.h
-  database/maintenance_postgresql_sql.h
-  database/postgresql.cc
-  database/postgresql.h
-  database/postgresql_writer.cc
-  database/postgresql_writer.h
-  database/query_builder.cc
-  database/query_builder.h
   dump_writer.cc
   dump_writer.h
   edge.cc
@@ -230,6 +221,70 @@ add_ida_plugin(${binexport_plugin_name}
   flow_graph.h
   function.cc
   function.h
+  instruction.cc
+  instruction.h
+  library_manager.cc
+  library_manager.h
+  operand.cc
+  operand.h
+  statistics_writer.cc
+  statistics_writer.h
+  type_system.cc
+  type_system.h
+  version.h
+  ${CMAKE_CURRENT_BINARY_DIR}/version.cc
+  virtual_memory.cc
+  virtual_memory.h
+  x86_nop.cc
+  x86_nop.h
+)
+target_link_libraries(binexport_core PUBLIC
+  absl::bad_optional_access
+  absl::flat_hash_map
+  absl::flat_hash_set
+  absl::hash
+  absl::node_hash_map
+  absl::node_hash_set
+  absl::optional
+  absl::strings
+  absl::time
+  binexport_shared
+)
+
+# Code shared with the BinDiff plugin
+add_ida_library(binexport_plugin_shared STATIC
+  hash.cc
+  hash.h
+  ida/digest.cc
+  ida/digest.h
+  ida/log_sink.cc
+  ida/log_sink.h
+  ida/util.cc
+  ida/util.h
+)
+ida_target_link_libraries(binexport_plugin_shared PUBLIC
+  absl::time
+  binexport_base
+)
+
+set(binexport_POSTGRESQL_SRCS)
+if(BINEXPORT_ENABLE_POSTGRESQL)
+  set(binexport_plugin_POSTGRESQL_SRCS
+    database/initialize_constraints_postgresql_sql.h
+    database/initialize_indices_postgresql_sql.h
+    database/initialize_tables_postgresql_sql.h
+    database/maintenance_postgresql_sql.h
+    database/postgresql.cc
+    database/postgresql.h
+    database/postgresql_writer.cc
+    database/postgresql_writer.h
+    database/query_builder.cc
+    database/query_builder.h
+  )
+endif()
+set(binexport_plugin_name binexport${binexport_VERSION_MAJOR})
+add_ida_plugin(${binexport_plugin_name}
+  ${binexport_plugin_POSTGRESQL_SRCS}
   ida/arm.cc
   ida/arm.h
   ida/dalvik.cc
@@ -249,23 +304,16 @@ add_ida_plugin(${binexport_plugin_name}
   ida/ppc.h
   ida/types_container.cc
   ida/types_container.h
-  instruction.cc
-  instruction.h
-  library_manager.cc
-  library_manager.h
-  operand.cc
-  operand.h
-  statistics_writer.cc
-  statistics_writer.h
-  type_system.cc
-  type_system.h
-  version.h
-  ${CMAKE_CURRENT_BINARY_DIR}/version.cc
-  virtual_memory.cc
-  virtual_memory.h
-  x86_nop.cc
-  x86_nop.h
+  ida/ui.cc
+  ida/ui.h
 )
+if(BINEXPORT_ENABLE_POSTGRESQL)
+  list(APPEND binexport_libraries
+    ${PostgreSQL_LIBRARIES}
+    # OpenSSL must come after PostgreSQL
+    OpenSSL::SSL
+  )
+endif()
 if(WIN32)
   list(APPEND binexport_libraries crypt32.lib
                                   secur32.lib
@@ -283,11 +331,8 @@ ida_target_link_libraries(${binexport_plugin_name}
   absl::optional
   absl::strings
   absl::time
-  binexport_shared
+  binexport_core
   binexport_plugin_shared
-  ${PostgreSQL_LIBRARIES}
-  # OpenSSL must come after PostgreSQL
-  OpenSSL::SSL
   ${binexport_libraries}
 )
 set_ida_target_properties(${binexport_plugin_name}
@@ -298,7 +343,12 @@ ida_install(TARGETS ${binexport_plugin_name}
             RUNTIME DESTINATION binexport-prefix
             LIBRARY DESTINATION binexport-prefix)
 
-# Experimental BinExport reader library
+# Binary Ninja plugin (experimental)
+if(BinaryNinjaApi_FOUND)
+  add_subdirectory(binaryninja)
+endif()
+
+# BinExport reader library
 add_library(binexport_reader STATIC
   reader/call_graph.cc
   reader/call_graph.h
@@ -309,6 +359,7 @@ add_library(binexport_reader STATIC
   reader/instruction.h
 )
 target_link_libraries(binexport_reader PUBLIC
+  absl::inlined_vector
   absl::strings
   binexport_shared
 )
@@ -317,15 +368,13 @@ add_executable(binexport_reader_test
   reader/flow_graph_test.cc
   reader/graph_utility_test.cc
   reader/instruction_test.cc
-  reader/reader_test_util.cc
-  reader/reader_test_util.h
 )
 target_link_libraries(binexport_reader_test PUBLIC
   gtest_main
   gmock
   binexport_reader
+  binexport_testing
 )
-add_test(
-  NAME BinExportReaderTests
-  COMMAND binexport_reader_test ${PROJECT_SOURCE_DIR}/reader
+gtest_discover_tests(binexport_reader_test PROPERTIES
+  ENVIRONMENT "TEST_SRCDIR=${_binexport_src}"
 )

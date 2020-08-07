@@ -15,10 +15,14 @@
 #ifndef ENTRY_POINT_H_
 #define ENTRY_POINT_H_
 
+#include <algorithm>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "third_party/zynamics/binexport/instruction.h"
 #include "third_party/zynamics/binexport/types.h"
+#include "third_party/zynamics/binexport/virtual_memory.h"
 
 class EntryPoint {
  public:
@@ -70,27 +74,51 @@ bool operator==(const EntryPoint& lhs, const EntryPoint& rhs);
 
 typedef std::vector<EntryPoint> EntryPoints;
 
-class EntryPointAdder {
+class EntryPointManager {
  public:
-  EntryPointAdder(EntryPointAdder* parent, std::string name)
+  EntryPointManager(EntryPointManager* parent, std::string name)
       : parent_(parent),
         entry_points_(parent->entry_points_),
         count_(0),
-        name_(name) {}
-  EntryPointAdder(EntryPoints* entry_points, std::string name)
-      : parent_(nullptr), entry_points_(entry_points), count_(0), name_(name) {}
+        name_(std::move(name)),
+        memory_flags_(nullptr) {}
+  EntryPointManager(EntryPoints* entry_points, std::string name)
+      : EntryPointManager(entry_points, std::move(name),
+                          /*memory_flags=*/nullptr) {}
+  EntryPointManager(EntryPoints* entry_points, std::string name,
+                    AddressSpace* memory_flags)
+      : parent_(nullptr),
+        entry_points_(entry_points),
+        count_(0),
+        name_(std::move(name)),
+        memory_flags_(memory_flags) {}
 
-  ~EntryPointAdder();
+  ~EntryPointManager();
 
   void Add(Address address, EntryPoint::Source source);
 
   EntryPoints* entry_points() { return entry_points_; }
 
+  bool IsEntryPoint(Address address) const {
+    return memory_flags_ != nullptr && memory_flags_->IsValidAddress(address) &&
+           (memory_flags_->GetFlags(address) & FLAG_ENTRY_POINT);
+  }
+
+  bool IsPotentialEntryPoint(Address address) const {
+    return std::find_if(entry_points_->cbegin(), entry_points_->cend(),
+                        [address](const EntryPoint& check) {
+                          return (check.address_ == address) &&
+                                 (check.IsCallTarget() || check.IsExternal() ||
+                                  check.IsFunctionPrologue());
+                        }) != entry_points_->cend();
+  }
+
  private:
-  EntryPointAdder* parent_;
+  EntryPointManager* parent_;
   EntryPoints* entry_points_;
   size_t count_;
   std::string name_;
+  AddressSpace* memory_flags_;  // Not owned.
 };
 
 #endif  // ENTRY_POINT_H_

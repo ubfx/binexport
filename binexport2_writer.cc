@@ -43,7 +43,6 @@
 #include "third_party/zynamics/binexport/call_graph.h"
 #include "third_party/zynamics/binexport/flow_graph.h"
 #include "third_party/zynamics/binexport/function.h"
-#include "third_party/zynamics/binexport/util/canonical_errors.h"
 #include "third_party/zynamics/binexport/util/status_macros.h"
 
 namespace security::binexport {
@@ -729,14 +728,13 @@ void WriteSections(const AddressSpace& address_space, BinExport2* proto) {
 }
 
 // Writes a binary protocol buffer to the specified filename.
-not_absl::Status WriteProtoToFile(const std::string& filename,
-                                  BinExport2* proto) {
+absl::Status WriteProtoToFile(const std::string& filename, BinExport2* proto) {
   std::ofstream stream(filename, std::ios::binary | std::ios::out);
   if (!proto->SerializeToOstream(&stream)) {
-    return not_absl::UnknownError(
+    return absl::UnknownError(
         absl::StrCat("error serializing data to: '", filename, ""));
   }
-  return not_absl::OkStatus();
+  return absl::OkStatus();
 }
 }  // namespace
 
@@ -749,10 +747,10 @@ BinExport2Writer::BinExport2Writer(const std::string& result_filename,
       executable_hash_(executable_hash),
       architecture_(architecture) {}
 
-not_absl::Status BinExport2Writer::WriteToProto(
+absl::Status BinExport2Writer::WriteToProto(
     const CallGraph& call_graph, const FlowGraph& flow_graph,
     const Instructions& instructions,
-    const AddressReferences& address_references, const TypeSystem* type_system,
+    const AddressReferences& address_references,
     const AddressSpace& address_space, BinExport2* proto) const {
   auto* meta_information = proto->mutable_meta_information();
   meta_information->set_executable_name(executable_filename_);
@@ -779,20 +777,19 @@ not_absl::Status BinExport2Writer::WriteToProto(
   WriteCallGraph(call_graph, flow_graph, proto);
   WriteSections(address_space, proto);
 
-  return not_absl::OkStatus();
+  return absl::OkStatus();
 }
 
-not_absl::Status BinExport2Writer::Write(
+absl::Status BinExport2Writer::Write(
     const CallGraph& call_graph, const FlowGraph& flow_graph,
     const Instructions& instructions,
-    const AddressReferences& address_references, const TypeSystem* type_system,
+    const AddressReferences& address_references, const TypeSystem*,
     const AddressSpace& address_space) {
   LOG(INFO) << "Writing to: \"" << filename_ << "\".";
 
   BinExport2 proto;
   NA_RETURN_IF_ERROR(WriteToProto(call_graph, flow_graph, instructions,
-                                  address_references, type_system,
-                                  address_space, &proto));
+                                  address_references, address_space, &proto));
   return WriteProtoToFile(filename_, &proto);
 }
 

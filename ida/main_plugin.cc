@@ -27,26 +27,31 @@
 
 #include "base/logging.h"
 #include "third_party/absl/base/attributes.h"
+#include "third_party/absl/memory/memory.h"
 #include "third_party/absl/strings/ascii.h"
 #include "third_party/absl/strings/escaping.h"
+#include "third_party/absl/strings/match.h"
 #include "third_party/absl/strings/numbers.h"
 #include "third_party/absl/strings/str_cat.h"
 #include "third_party/absl/time/time.h"
 #include "third_party/zynamics/binexport/binexport2_writer.h"
 #include "third_party/zynamics/binexport/call_graph.h"
+#ifdef ENABLE_POSTGRESQL
 #include "third_party/zynamics/binexport/database/postgresql_writer.h"
+#endif
 #include "third_party/zynamics/binexport/dump_writer.h"
 #include "third_party/zynamics/binexport/entry_point.h"
 #include "third_party/zynamics/binexport/flow_analyzer.h"
 #include "third_party/zynamics/binexport/flow_graph.h"
 #include "third_party/zynamics/binexport/ida/digest.h"
-#include "third_party/zynamics/binexport/ida/log.h"
 #include "third_party/zynamics/binexport/ida/names.h"
+#include "third_party/zynamics/binexport/ida/log_sink.h"
 #include "third_party/zynamics/binexport/ida/ui.h"
 #include "third_party/zynamics/binexport/instruction.h"
 #include "third_party/zynamics/binexport/statistics_writer.h"
 #include "third_party/zynamics/binexport/util/filesystem.h"
 #include "third_party/zynamics/binexport/util/format.h"
+#include "third_party/zynamics/binexport/util/logging.h"
 #include "third_party/zynamics/binexport/util/timer.h"
 #include "third_party/zynamics/binexport/version.h"
 #include "third_party/zynamics/binexport/virtual_memory.h"
@@ -86,7 +91,7 @@ void ExportIdb(Writer* writer) {
   Timer<> timer;
   EntryPoints entry_points;
   {
-    EntryPointAdder entry_point_adder(&entry_points, "function chunks");
+    EntryPointManager entry_point_adder(&entry_points, "function chunks");
     for (size_t i = 0; i < get_fchunk_qty(); ++i) {
       if (const func_t* ida_func = getn_fchunk(i)) {
         entry_point_adder.Add(ida_func->start_ea,
@@ -101,7 +106,7 @@ void ExportIdb(Writer* writer) {
   // functions).
   const auto modules(InitModuleMap());
   {
-    EntryPointAdder entry_point_adder(&entry_points, "calls");
+    EntryPointManager entry_point_adder(&entry_points, "calls");
     for (const auto& module : modules) {
       entry_point_adder.Add(module.first, EntryPoint::Source::CALL_TARGET);
     }
@@ -122,16 +127,14 @@ void ExportIdb(Writer* writer) {
       HumanReadableDuration(timer.elapsed()));
 }
 
+#ifdef ENABLE_POSTGRESQL
 int ExportSql(absl::string_view schema_name,
               absl::string_view connection_string) {
   try {
-    auto sha256_or = GetInputFileSha256();
-    const std::string sha256 =
-        sha256_or.ok() ? std::move(sha256_or).ValueOrDie() : "";
-    auto md5_or = GetInputFileMd5();
-    const std::string md5 = md5_or.ok() ? std::move(md5_or).ValueOrDie() : "";
+    const std::string sha256 = GetInputFileSha256().value_or("");
+    const std::string md5 = GetInputFileMd5().value_or("");
     if (sha256.empty() && md5.empty()) {
-      throw std::runtime_error{"Failed to load input file hashes"};
+      throw std::runtime_error("Failed to load input file hashes");
     }
     DatabaseWriter writer(
         std::string(schema_name) /* Database */, GetModuleName(),
@@ -157,21 +160,18 @@ int ExportSql(absl::string_view schema_name,
   }
   return eOk;
 }
+#endif
 
 int ExportBinary(const std::string& filename) {
   try {
-    auto sha256_or = GetInputFileSha256();
     std::string hash;
-    if (sha256_or.ok()) {
-      hash = std::move(sha256_or).ValueOrDie();
+    if (auto sha256_or = GetInputFileSha256(); sha256_or.ok()) {
+      hash = std::move(sha256_or).value();
     } else {
-      auto md5_or = GetInputFileMd5();
-      if (md5_or.ok()) {
-        hash = std::move(md5_or).ValueOrDie();
-      }
+      hash = GetInputFileMd5().value_or("");
     }
-    BinExport2Writer writer{filename, GetModuleName(), hash,
-                            GetArchitectureName().value()};
+    BinExport2Writer writer(filename, GetModuleName(), hash,
+                            GetArchitectureName().value());
     ExportIdb(&writer);
   } catch (const std::exception& error) {
     LOG(INFO) << "Error exporting: " << error.what();
@@ -229,7 +229,7 @@ void idaapi ButtonTextExport(TWidget** /* fields */, int) {
   }
 
   if (FileExists(filename) &&
-        ask_yn(0, "'%s' already exists - overwrite?", filename) != 1) {
+      ask_yn(0, "'%s' already exists - overwrite?", filename) != 1) {
     return;
   }
 
@@ -263,7 +263,7 @@ void idaapi ButtonStatisticsExport(TWidget** /* fields */, int) {
   }
 
   if (FileExists(filename) &&
-        ask_yn(0, "'%s' already exists - overwrite?", filename) != 1) {
+      ask_yn(0, "'%s' already exists - overwrite?", filename) != 1) {
     return;
   }
 
@@ -290,9 +290,8 @@ const char* GetDialog() {
 int DoExport(ExportMode mode, std::string name,
              absl::string_view connection_string) {
   if (name.empty()) {
-    auto temp_or = GetOrCreateTempDirectory("BinExport");
-    name =
-        temp_or.ok() ? temp_or.ValueOrDie() : absl::StrCat(".", kPathSeparator);
+    name = GetOrCreateTempDirectory("BinExport")
+               .value_or(absl::StrCat(".", kPathSeparator));
   }
   if (IsDirectory(name) && connection_string.empty()) {
     name = JoinPath(name, GetDefaultName(mode));
@@ -301,7 +300,13 @@ int DoExport(ExportMode mode, std::string name,
   Instruction::SetBitness(GetArchitectureBitness());
   switch (mode) {
     case ExportMode::kSql:
+#ifdef ENABLE_POSTGRESQL
       return ExportSql(name, connection_string);
+#else
+      LOG(INFO) << "Error: PostgreSQL export not built-in, recompile with "
+                   "ENABLE_POSTGRESQL";
+      return -1;
+#endif
     case ExportMode::kBinary:
       return ExportBinary(name);
     case ExportMode::kText:
@@ -346,6 +351,7 @@ static const ext_idcfunc_t kBinExportStatisticsIdcFunc = {
     EXTFUN_BASE};
 
 error_t idaapi IdcBinExportSql(idc_value_t* argument, idc_value_t*) {
+#ifdef ENABLE_POSTGRESQL
   if (argument[0].vtype != VT_STR || argument[1].vtype != VT_LONG ||
       argument[2].vtype != VT_STR || argument[3].vtype != VT_STR ||
       argument[4].vtype != VT_STR || argument[5].vtype != VT_STR) {
@@ -365,6 +371,11 @@ error_t idaapi IdcBinExportSql(idc_value_t* argument, idc_value_t*) {
     return -1;
   }
   return eOk;
+#else
+  LOG(INFO) << "Error (BinExportSql): PostgreSQL export not built-in, "
+               "recompile with ENABLE_POSTGRESQL";
+  return -1;
+#endif
 }
 static const char kBinExportSqlIdcArgs[] = {VT_STR /* Host */,
                                             VT_LONG /* Port */,
@@ -377,6 +388,7 @@ static const ext_idcfunc_t kBinExportSqlIdcFunc = {
     "BinExportSql", IdcBinExportSql, kBinExportSqlIdcArgs, nullptr, 0,
     EXTFUN_BASE};
 
+#ifdef ENABLE_POSTGRESQL
 // Builds a database connection string from the plugin arguments given on the
 // command-line. Note: This function does not escape any of the strings it gets
 // passed in.
@@ -388,6 +400,7 @@ std::string GetConnectionStringFromArguments() {
                       GetArgument("Password"), "' port='", GetArgument("Port"),
                       "' dbname='" + GetArgument("Database") + "'");
 }
+#endif
 
 ssize_t idaapi UiHook(void*, int event_id, va_list arguments) {
   if (event_id != ui_ready_to_run) {
@@ -398,25 +411,26 @@ ssize_t idaapi UiHook(void*, int event_id, va_list arguments) {
 
   // If IDA was invoked with -OBinExportAutoAction:<action>, wait for auto
   // analysis to finish, then invoke the requested action and exit.
-  const std::string auto_action =
-      absl::AsciiStrToUpper(GetArgument("AutoAction"));
+  const std::string auto_action = GetArgument("AutoAction");
   if (auto_action.empty()) {
     return 0;
   }
   auto_wait();
 
-  if (auto_action == absl::AsciiStrToUpper(kBinExportSqlIdcFunc.name)) {
+#ifdef ENABLE_POSTGRESQL
+  if (absl::EqualsIgnoreCase(auto_action, kBinExportSqlIdcFunc.name)) {
     DoExport(ExportMode::kSql, GetArgument("Schema"),
              GetConnectionStringFromArguments());
-  } else if (auto_action ==
-             absl::AsciiStrToUpper(kBinExportBinaryIdcFunc.name)) {
+  } else  // NOLINT(readability/braces)
+#endif
+      if (absl::EqualsIgnoreCase(auto_action, kBinExportBinaryIdcFunc.name)) {
     DoExport(ExportMode::kBinary, GetArgument("Module"),
              /*connection_string=*/"");
-  } else if (auto_action == absl::AsciiStrToUpper(kBinExportTextIdcFunc.name)) {
+  } else if (absl::EqualsIgnoreCase(auto_action, kBinExportTextIdcFunc.name)) {
     DoExport(ExportMode::kText, GetArgument("Module"),
              /*connection_string=*/"");
-  } else if (auto_action ==
-             absl::AsciiStrToUpper(kBinExportStatisticsIdcFunc.name)) {
+  } else if (absl::EqualsIgnoreCase(auto_action,
+                                    kBinExportStatisticsIdcFunc.name)) {
     DoExport(ExportMode::kStatistics, GetArgument("Module"),
              /*connection_string=*/"");
   } else {
@@ -432,12 +446,14 @@ ssize_t idaapi UiHook(void*, int event_id, va_list arguments) {
   return 0;  // Not reached
 }
 
-int Plugin::Init() {
+Plugin::LoadStatus Plugin::Init() {
   alsologtostderr_ =
       absl::AsciiStrToUpper(GetArgument("AlsoLogToStdErr")) == "TRUE";
-  if (!InitLogging(LoggingOptions{}
-                       .set_alsologtostderr(alsologtostderr_)
-                       .set_log_filename(GetArgument("LogFile")))) {
+  if (auto status = InitLogging(LoggingOptions{}
+                                    .set_alsologtostderr(alsologtostderr_)
+                                    .set_log_filename(GetArgument("LogFile")),
+                                absl::make_unique<IdaLogSink>());
+      !status.ok()) {
     LOG(INFO) << "Error initializing logging, skipping BinExport plugin";
     return PLUGIN_SKIP;
   }
@@ -493,6 +509,7 @@ bool Plugin::Run(size_t argument) {
   try {
     if (argument) {
       std::string connection_string;
+#ifdef ENABLE_POSTGRESQL
       std::string module;
       if (!GetArgument("Host").empty()) {
         connection_string = GetConnectionStringFromArguments();
@@ -500,11 +517,14 @@ bool Plugin::Run(size_t argument) {
       } else {
         module = GetArgument("Module");
       }
+#else
+      std::string module = GetArgument("Module");
+#endif
 
       DoExport(static_cast<ExportMode>(argument), module, connection_string);
     } else {
       ask_form(GetDialog(), ButtonBinaryExport, ButtonTextExport,
-                     ButtonStatisticsExport);
+               ButtonStatisticsExport);
     }
   } catch (const std::exception& error) {
     LOG(INFO) << "export cancelled: " << error.what();

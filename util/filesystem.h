@@ -20,15 +20,16 @@
 #include <string>
 #include <vector>
 
+#include "third_party/absl/status/status.h"
 #include "third_party/absl/strings/string_view.h"
 #include "third_party/zynamics/binexport/types.h"
-#include "third_party/zynamics/binexport/util/status.h"
 #include "third_party/zynamics/binexport/util/statusor.h"
 
 #ifdef WIN32
 // Some Abseil headers include Windows.h, so undo a few macros
 #undef CopyFile             // winbase.h
 #undef GetCurrentDirectory  // processenv.h
+#undef GetFullPathName      // fileapi.h
 #undef StrCat               // shlwapi.h
 #endif
 
@@ -44,8 +45,11 @@ std::string JoinPathImpl(std::initializer_list<absl::string_view> paths);
 // std::string.
 std::string GetCurrentDirectory();
 
+// Returns the full path and filename of the specified file.
+std::string GetFullPathName(absl::string_view path);
+
 // Recursively creates directories for a specified path.
-not_absl::Status CreateDirectories(absl::string_view path);
+absl::Status CreateDirectories(absl::string_view path);
 
 // Returns the path to an OS-specific directory for temporary files.
 not_absl::StatusOr<std::string> GetTempDirectory(
@@ -87,13 +91,13 @@ bool FileExists(absl::string_view path);
 bool IsDirectory(absl::string_view path);
 
 // List the files in the specified directory.
-not_absl::Status GetDirectoryEntries(absl::string_view path,
-                                     std::vector<std::string>* result);
+absl::Status GetDirectoryEntries(absl::string_view path,
+                                 std::vector<std::string>* result);
 
 // Removes all files and sub-directories under path.
-not_absl::Status RemoveAll(absl::string_view path);
+absl::Status RemoveAll(absl::string_view path);
 
 // Copies a file.
-not_absl::Status CopyFile(absl::string_view from, absl::string_view to);
+absl::Status CopyFile(absl::string_view from, absl::string_view to);
 
 #endif  // UTIL_FILESYSTEM_H_
